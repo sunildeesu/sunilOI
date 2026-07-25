@@ -7,8 +7,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/sunildeesu/MarketAnalysisOI/participant_oi.py</string>
+        <string>/bin/bash</string>
+        <string>/Users/sunildeesu/MarketAnalysisOI/run_nightly.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
