@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.marketanalysis.participantoi</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/sunildeesu/MarketAnalysisOI/participant_oi.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/sunildeesu/MarketAnalysisOI</string>
+
+    <!-- 22:30 local time = 10:30 PM IST (machine tz is Asia/Kolkata) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>22</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- If the Mac was asleep at 22:30, launchd runs it once on next wake -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sunildeesu/MarketAnalysisOI/logs/participant_oi.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/sunildeesu/MarketAnalysisOI/logs/participant_oi.err.log</string>
+</dict>
+</plist>
