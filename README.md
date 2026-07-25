@@ -38,9 +38,19 @@ pip3 install openpyxl requests   # pandas optional
 python3 participant_oi.py
 ```
 
-## Scheduling (macOS, 10:30 PM IST nightly)
+## Scheduling (macOS, 10:30 PM IST on trading days)
 
-A LaunchAgent (`com.marketanalysis.participantoi`) runs the script daily at 22:30
-local time. See `com.marketanalysis.participantoi.plist` in this repo for the
-template; install it to `~/Library/LaunchAgents/` and load with
-`launchctl bootstrap gui/$(id -u) <plist>`.
+A LaunchAgent (`com.marketanalysis.participantoi`) fires `run_nightly.sh` at 22:30
+local time **Mon-Fri**. The wrapper:
+
+1. Runs `participant_oi.py`, which **no-ops on market holidays** (if NSE has
+   published no participant file for the day, nothing is regenerated).
+2. Commits and pushes the workbook **only when the source data actually changed** -
+   gated on `report_data.hash`, a fingerprint of the data (not the generation
+   timestamp), so re-runs and non-trading days produce no noise commits.
+
+Weekends are excluded at the launchd level (weekday-only triggers); weekday
+holidays are handled by the runtime check above.
+
+Install: copy `com.marketanalysis.participantoi.plist` to `~/Library/LaunchAgents/`
+and load with `launchctl bootstrap gui/$(id -u) <plist>`.

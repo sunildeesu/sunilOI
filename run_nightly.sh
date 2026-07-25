@@ -24,9 +24,11 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
-# 2. Commit & push the workbook if it changed ------------------------------- #
-if [ -n "$("$GIT" status --porcelain -- participant_oi.xlsx)" ]; then
-    "$GIT" add participant_oi.xlsx
+# 2. Commit & push only when the underlying data changed -------------------- #
+# report_data.hash is a fingerprint of the source data (not the timestamp), so a
+# holiday/weekend or a same-day re-run produces no diff here and no commit.
+if [ -n "$("$GIT" status --porcelain -- report_data.hash)" ]; then
+    "$GIT" add participant_oi.xlsx report_data.hash
     "$GIT" commit -m "Update participant OI report - $(date '+%Y-%m-%d')"
     if "$GIT" push origin main; then
         echo "pushed updated report to GitHub"
@@ -35,7 +37,9 @@ if [ -n "$("$GIT" status --porcelain -- participant_oi.xlsx)" ]; then
         exit 1
     fi
 else
-    echo "report unchanged; nothing to commit"
+    echo "data unchanged; nothing to commit"
+    # discard the regenerated-but-identical workbook so the tree stays clean
+    "$GIT" checkout -- participant_oi.xlsx 2>/dev/null || true
 fi
 
 echo "===== done ====="

@@ -18,7 +18,9 @@ Run any time after ~7 PM IST; NSE publishes the file after market close.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 import sys
 import urllib.parse
 from datetime import date, datetime, timedelta
@@ -44,6 +46,7 @@ except Exception:  # pragma: no cover - fallback if tz data is unavailable
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 OUTPUT_FILE = ROOT / "participant_oi.xlsx"
+HASH_FILE = ROOT / "report_data.hash"  # fingerprint of source data; drives commit-on-change
 
 URL_TEMPLATE = "https://archives.nseindia.com/content/nsccl/fao_participant_oi_{ddmmyyyy}.csv"
 INDEX_URL_TEMPLATE = "https://archives.nseindia.com/content/indices/ind_close_all_{ddmmyyyy}.csv"
@@ -338,7 +341,7 @@ def _net_label(delta):
 # --------------------------------------------------------------------------- #
 # Build workbook
 # --------------------------------------------------------------------------- #
-def build(days: list[tuple[date, dict]], path: Path) -> None:
+def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> None:
     today, d1, d2 = days[0], days[1], days[2]
     (dt_today, day_today) = today
     (dt_1, day_1) = d1
@@ -439,7 +442,6 @@ def build(days: list[tuple[date, dict]], path: Path) -> None:
 
     # ---- Nifty support & resistance (bottom-right, below the right block) ---- #
     sr_last = rr
-    ohlc = fetch_nifty_ohlc(dt_today)
     if ohlc:
         ndate, o, h, l, c = ohlc
         p = pivot_levels(h, l, c)
@@ -484,7 +486,6 @@ def build(days: list[tuple[date, dict]], path: Path) -> None:
         sr_last = s + 4 + len(levels)
 
     # ---- Nifty option-chain OI support & resistance, graded by volume ---- #
-    oc = fetch_nifty_option_chain("NIFTY")
     if oc:
         a = analyze_oi_sr(oc)
         mx = a["max_vol"]
@@ -552,11 +553,35 @@ def build(days: list[tuple[date, dict]], path: Path) -> None:
     wb.save(path)
 
 
+def data_fingerprint(days: list[tuple[date, dict]], ohlc) -> str:
+    """Deterministic hash of the report's source data (ignores generation time).
+
+    Covers the 3 days of participant OI and the Nifty OHLC - the archive-based,
+    date-stamped inputs. Unchanged inputs -> identical hash -> no new commit.
+    """
+    payload = {
+        "days": [[d.isoformat(), day] for d, day in days],
+        "ohlc": [ohlc[0].isoformat(), *ohlc[1:]] if ohlc else None,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
 def main() -> None:
+    today = datetime.now(IST).date()
+
+    # Skip weekends & market holidays: NSE publishes no participant file that day.
+    if _fetch_raw(today) is None:
+        print(f"{today:%d-%b-%Y}: weekend/market holiday - no NSE data published, skipping run.")
+        return
+
     print("Fetching NSE participant-wise OI...")
     days = load_recent_days()
+    ohlc = fetch_nifty_ohlc(days[0][0])
+    oc = fetch_nifty_option_chain("NIFTY")
     print(f"Building {OUTPUT_FILE.name}...")
-    build(days, OUTPUT_FILE)
+    build(days, ohlc, oc, OUTPUT_FILE)
+    HASH_FILE.write_text(data_fingerprint(days, ohlc) + "\n")
     print(f"Done -> {OUTPUT_FILE}")
 
 
