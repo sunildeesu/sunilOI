@@ -85,14 +85,16 @@ COLS = {
     "Option Stock Put Short": 12,
 }
 
-# Instruments: (display name, long-col, short-col)
+# Instruments: (display name, long-col, short-col, long_is_bullish)
+# long_is_bullish: a long future or long call is bullish, but a long PUT is bearish,
+# so puts invert the sentiment colouring of every long/short/net cell.
 INSTRUMENTS = [
-    ("Index Futures", "Future Index Long", "Future Index Short"),
-    ("Index Call", "Option Index Call Long", "Option Index Call Short"),
-    ("Index Put", "Option Index Put Long", "Option Index Put Short"),
-    ("Stock Futures", "Future Stock Long", "Future Stock Short"),
-    ("Stock Calls", "Option Stock Call Long", "Option Stock Call Short"),
-    ("Stock Puts", "Option Stock Put Long", "Option Stock Put Short"),
+    ("Index Futures", "Future Index Long", "Future Index Short", True),
+    ("Index Call", "Option Index Call Long", "Option Index Call Short", True),
+    ("Index Put", "Option Index Put Long", "Option Index Put Short", False),
+    ("Stock Futures", "Future Stock Long", "Future Stock Short", True),
+    ("Stock Calls", "Option Stock Call Long", "Option Stock Call Short", True),
+    ("Stock Puts", "Option Stock Put Long", "Option Stock Put Short", False),
 ]
 
 # --------------------------------------------------------------------------- #
@@ -325,17 +327,29 @@ def _put(ws, r, c, value, *, font=None, fill=None, align=None, fmt=None, border=
     return cell
 
 
-def _long_label(delta):
-    return ("Added Longs" if delta >= 0 else "Closed Longs"), (GREEN if delta >= 0 else RED)
+def _colour(bullish):
+    return GREEN if bullish else RED
 
 
-def _short_label(delta):
-    # Adding shorts is bearish (red); covering/closing shorts is bullish (green).
-    return ("Added Shorts" if delta >= 0 else "Closed Shorts"), (RED if delta >= 0 else GREEN)
+def _long_label(delta, long_bullish=True):
+    # Adding to a bullish long is bullish; for puts (long_bullish=False) it inverts.
+    label = "Added Longs" if delta >= 0 else "Closed Longs"
+    bullish = (delta >= 0) if long_bullish else (delta < 0)
+    return label, _colour(bullish)
 
 
-def _net_label(delta):
-    return ("Bought Net" if delta >= 0 else "Sold Net"), (GREEN if delta >= 0 else RED)
+def _short_label(delta, long_bullish=True):
+    # A short is the opposite stance of the long, so its sentiment is inverted again.
+    label = "Added Shorts" if delta >= 0 else "Closed Shorts"
+    bullish = (delta < 0) if long_bullish else (delta >= 0)
+    return label, _colour(bullish)
+
+
+def _net_label(delta, long_bullish=True):
+    # Net buying is bullish for futures/calls, bearish for puts (buying puts = bearish).
+    label = "Bought Net" if delta >= 0 else "Sold Net"
+    bullish = (delta >= 0) if long_bullish else (delta < 0)
+    return label, _colour(bullish)
 
 
 # --------------------------------------------------------------------------- #
@@ -365,7 +379,7 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
 
     r = 2
     # Each instrument section occupies: 1 sub-header + 4 participants + 1 total = 6 rows
-    for instr_name, long_col, short_col in INSTRUMENTS:
+    for instr_name, long_col, short_col, long_bullish in INSTRUMENTS:
         # ---- LEFT block sub-headers ---- #
         _put(ws, r, 1, "", fill=INSTR_FILL)
         _put(ws, r, 2, f"{instr_name} Longs", font=BOLD, fill=SUBHEAD, align=CENTER)
@@ -393,9 +407,9 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
             tot_dlong += d_long
             tot_dshort += d_short
 
-            l_lbl, l_font = _long_label(d_long)
-            s_lbl, s_font = _short_label(d_short)
-            n_lbl, n_font = _net_label(d_net)
+            l_lbl, l_font = _long_label(d_long, long_bullish)
+            s_lbl, s_font = _short_label(d_short, long_bullish)
+            n_lbl, n_font = _net_label(d_net, long_bullish)
 
             _put(ws, r, 1, disp, font=BOLD, align=LEFT)
             _put(ws, r, 2, l_lbl, font=l_font, align=LEFT)
@@ -428,12 +442,12 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
     # ---- RIGHT block: Positions Bought / Sold Today, grouped by participant --- #
     rr = 2
     for csv_key, disp in PARTICIPANTS:
-        for instr_name, long_col, short_col in INSTRUMENTS:
+        for instr_name, long_col, short_col, long_bullish in INSTRUMENTS:
             d_net = (
                 (day_today[csv_key][long_col] - day_1[csv_key][long_col])
                 - (day_today[csv_key][short_col] - day_1[csv_key][short_col])
             )
-            n_lbl, n_font = _net_label(d_net)
+            n_lbl, n_font = _net_label(d_net, long_bullish)
             _put(ws, rr, 14, disp, font=BOLD, align=LEFT)
             _put(ws, rr, 15, n_lbl, font=n_font, align=LEFT)
             _put(ws, rr, 16, instr_name, align=LEFT)
