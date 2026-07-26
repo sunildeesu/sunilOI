@@ -8,5 +8,9 @@ __pycache__/
 .venv/
 venv/
 
+# nix build result / GC-root symlink (points into /nix/store)
+.nix-python
+result
+
 # macOS
 .DS_Store

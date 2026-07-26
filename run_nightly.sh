@@ -9,12 +9,22 @@
 set -u
 
 REPO="/Users/sunildeesu/MarketAnalysisOI"
-PY="/usr/bin/python3"
+NIX="/nix/var/nix/profiles/default/bin/nix"
 GIT="/usr/bin/git"
 
 cd "$REPO" || { echo "cannot cd to $REPO"; exit 1; }
 
 echo "===== nightly run $(date '+%Y-%m-%d %H:%M:%S %Z') ====="
+
+# 0. Reproducible Python via nix -------------------------------------------- #
+# Build (or reuse) the pinned python3 + openpyxl + requests env. The --out-link
+# is a GC root, so nix-collect-garbage won't remove it and cached rebuilds are
+# near-instant and offline. This replaces the fragile Apple system python.
+if ! "$NIX" build "$REPO#pythonEnv" --out-link "$REPO/.nix-python"; then
+    echo "nix build of python env failed; aborting run"
+    exit 1
+fi
+PY="$REPO/.nix-python/bin/python3"
 
 # 1. Build the report ------------------------------------------------------- #
 "$PY" "$REPO/participant_oi.py"

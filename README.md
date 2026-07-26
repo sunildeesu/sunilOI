@@ -33,10 +33,17 @@ trading days automatically. Raw daily files are cached under `data/`.
 
 ## Usage
 
+The Python environment (python3 + `openpyxl` + `requests`) is declared
+reproducibly in `flake.nix` - no global/pip installs required.
+
 ```bash
-pip3 install openpyxl requests   # pandas optional
-python3 participant_oi.py
+nix run          # generate the report
+nix develop      # shell with the pinned python for hacking
+python3 participant_oi.py   # inside the dev shell
 ```
+
+`run_nightly.sh` builds this env via `nix build .#pythonEnv --out-link .nix-python`
+(a GC root, so it survives `nix-collect-garbage`) and runs the script with it.
 
 ## Scheduling (macOS, 10:30 PM IST on trading days)
 
