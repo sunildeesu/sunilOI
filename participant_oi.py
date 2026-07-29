@@ -2,14 +2,17 @@
 """
 NSE Participant-wise Open Interest -> Excel report.
 
-Fetches the "F&O - Participant wise Open Interest" report from NSE for the 3 most
+Fetches the "F&O - Participant wise Open Interest" report from NSE for the 5 most
 recent trading days and builds an Excel workbook mirroring the analyst layout:
 
   * Left block   "Futures & Options"           - day-over-day change per participant
                                                   (Added/Closed Longs & Shorts, Net Buy/Sell)
   * Middle block "Total Positions Carried"      - net position (Long-Short) for
-                                                  TODAY / 1 DAY AGO / 2 DAYS AGO
+                                                  TODAY back through 4 DAYS AGO
   * Right block  "Positions Bought / Sold Today"- the net-change data pivoted by participant
+
+A compact "India VIX" strip below the middle block tracks the closing VIX over the
+same 5 sessions.
 
 Raw daily CSVs are cached under data/ so historical days are never re-fetched.
 Run any time after ~7 PM IST; NSE publishes the file after market close.
@@ -59,7 +62,26 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 MAX_LOOKBACK_DAYS = 15  # safety bound when walking back over holidays
-NUM_DAYS = 3            # today, 1 day ago, 2 days ago
+NUM_DAYS = 5            # today .. 4 days ago (net-positions-carried horizon)
+
+
+def _day_label(i: int) -> str:
+    """Column heading for the i-th most recent session (0 = today)."""
+    if i == 0:
+        return "TODAY"
+    return f"{i} DAY{'S' if i > 1 else ''} AGO"
+
+
+DAY_LABELS = [_day_label(i) for i in range(NUM_DAYS)]
+
+# Column layout (1-based). Left block = cols 1-7 (col 8 spacer). The middle
+# "Total Positions Carried" block is a label column plus one column per day; the
+# right block base column follows a one-column gutter, so it shifts automatically
+# with NUM_DAYS instead of being hardcoded.
+MID_LABEL_COL = 9
+MID_DAY_COL0 = 10                              # first (TODAY) day column
+SPACER_MID_RIGHT = MID_DAY_COL0 + NUM_DAYS     # blank gutter after the day columns
+RB = SPACER_MID_RIGHT + 1                      # right-block base column
 
 # Participant rows: (CSV key, display label)
 PARTICIPANTS = [
@@ -167,28 +189,56 @@ def net(day: dict, participant: str, long_col: str, short_col: str) -> int:
     return p[long_col] - p[short_col]
 
 
+def _fetch_index_close_csv(d: date) -> str | None:
+    """Return the ind_close_all CSV text for date d (cached), or None if unavailable."""
+    cache = DATA_DIR / f"ind_close_all_{d.isoformat()}.csv"
+    if cache.exists():
+        return cache.read_text()
+    url = INDEX_URL_TEMPLATE.format(ddmmyyyy=d.strftime("%d%m%Y"))
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    except requests.RequestException:
+        return None
+    if resp.status_code == 200 and "Index Name" in resp.text:
+        DATA_DIR.mkdir(exist_ok=True)
+        cache.write_text(resp.text)
+        return resp.text
+    return None
+
+
+def _index_row(text: str, name: str) -> list[str] | None:
+    """First row of an index-close CSV whose Index Name matches `name`."""
+    for row in csv.reader(io.StringIO(text)):
+        if row and row[0].strip() == name:
+            return row
+    return None
+
+
 def fetch_nifty_ohlc(d: date, max_back: int = 7):
     """Return (date, open, high, low, close) for Nifty 50 on/just before d, or None."""
     cur = d
     for _ in range(max_back):
-        cache = DATA_DIR / f"ind_close_all_{cur.isoformat()}.csv"
-        text = cache.read_text() if cache.exists() else None
-        if text is None:
-            url = INDEX_URL_TEMPLATE.format(ddmmyyyy=cur.strftime("%d%m%Y"))
-            try:
-                resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
-            except requests.RequestException:
-                resp = None
-            if resp is not None and resp.status_code == 200 and "Index Name" in resp.text:
-                text = resp.text
-                DATA_DIR.mkdir(exist_ok=True)
-                cache.write_text(text)
+        text = _fetch_index_close_csv(cur)
         if text:
-            for row in csv.reader(io.StringIO(text)):
-                if row and row[0].strip() == "Nifty 50":
-                    return (cur, float(row[2]), float(row[3]), float(row[4]), float(row[5]))
+            row = _index_row(text, "Nifty 50")
+            if row:
+                return (cur, float(row[2]), float(row[3]), float(row[4]), float(row[5]))
         cur -= timedelta(days=1)
     return None
+
+
+def fetch_vix_history(days: list[tuple[date, dict]]) -> list[tuple[date, float | None]]:
+    """Closing India VIX for each report day, aligned by date (None if unavailable).
+
+    India VIX ships in the same ind_close_all file as the Nifty OHLC (closing value
+    is column index 5), so this reuses the cached per-day download.
+    """
+    out: list[tuple[date, float | None]] = []
+    for d, _ in days:
+        text = _fetch_index_close_csv(d)
+        row = _index_row(text, "India VIX") if text else None
+        out.append((d, float(row[5]) if row else None))
+    return out
 
 
 def pivot_levels(high: float, low: float, close: float) -> dict[str, float]:
@@ -310,6 +360,7 @@ BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 
 IND_FMT = "#,##,##0;-#,##,##0;0"  # Indian digit grouping, kept numeric
 NIFTY_FMT = "#,##,##0.00"          # index level with two decimals
+VIX_FMT = "0.00"                   # volatility index, two decimals
 
 
 def _put(ws, r, c, value, *, font=None, fill=None, align=None, fmt=None, border=True):
@@ -355,11 +406,12 @@ def _net_label(delta, long_bullish=True):
 # --------------------------------------------------------------------------- #
 # Build workbook
 # --------------------------------------------------------------------------- #
-def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> None:
-    today, d1, d2 = days[0], days[1], days[2]
-    (dt_today, day_today) = today
-    (dt_1, day_1) = d1
-    (dt_2, day_2) = d2
+def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
+          vix_hist: list[tuple[date, float | None]], path: Path) -> None:
+    # Day-over-day change (left & right blocks) compares today vs 1 day ago; the
+    # middle block spans all loaded days.
+    (dt_today, day_today) = days[0]
+    (dt_1, day_1) = days[1]
 
     wb = Workbook()
     ws = wb.active
@@ -370,11 +422,11 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
     _put(ws, 1, 1, "Futures & Options", font=WHITE_BOLD, fill=NAVY, align=LEFT)
     for c in range(2, 8):
         _put(ws, 1, c, None, fill=NAVY)
-    _put(ws, 1, 9, "Total Positions Carried", font=WHITE_BOLD, fill=NAVY, align=CENTER)
-    for c in (10, 11, 12):
+    _put(ws, 1, MID_LABEL_COL, "Total Positions Carried", font=WHITE_BOLD, fill=NAVY, align=CENTER)
+    for c in range(MID_LABEL_COL + 1, MID_LABEL_COL + 1 + NUM_DAYS):
         _put(ws, 1, c, None, fill=NAVY)
-    _put(ws, 1, 14, "Positions Bought / Sold Today", font=WHITE_BOLD, fill=NAVY, align=CENTER)
-    for c in (15, 16, 17):
+    _put(ws, 1, RB, "Positions Bought / Sold Today", font=WHITE_BOLD, fill=NAVY, align=CENTER)
+    for c in (RB + 1, RB + 2, RB + 3):
         _put(ws, 1, c, None, fill=NAVY)
 
     r = 2
@@ -389,10 +441,9 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
         _put(ws, r, 6, "Net Buy / Sell for Today", font=BOLD, fill=SUBHEAD, align=CENTER)
         _put(ws, r, 7, "", fill=SUBHEAD)
         # ---- MIDDLE block sub-headers ---- #
-        _put(ws, r, 9, instr_name, font=BOLD, fill=SUBHEAD, align=LEFT)
-        _put(ws, r, 10, "TODAY", font=BOLD, fill=SUBHEAD, align=CENTER)
-        _put(ws, r, 11, "1 DAY AGO", font=BOLD, fill=SUBHEAD, align=CENTER)
-        _put(ws, r, 12, "2 DAYS AGO", font=BOLD, fill=SUBHEAD, align=CENTER)
+        _put(ws, r, MID_LABEL_COL, instr_name, font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, label in enumerate(DAY_LABELS):
+            _put(ws, r, MID_DAY_COL0 + i, label, font=BOLD, fill=SUBHEAD, align=CENTER)
         r += 1
 
         tot_dlong = tot_dshort = 0
@@ -419,11 +470,11 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
             _put(ws, r, 6, n_lbl, font=n_font, align=LEFT)
             _put(ws, r, 7, d_net, font=n_font, align=RIGHT, fmt=IND_FMT)
 
-            # ---- MIDDLE block: net positions carried ---- #
-            _put(ws, r, 9, disp, font=BOLD, align=LEFT)
-            _put(ws, r, 10, net(day_today, csv_key, long_col, short_col), align=RIGHT, fmt=IND_FMT)
-            _put(ws, r, 11, net(day_1, csv_key, long_col, short_col), align=RIGHT, fmt=IND_FMT)
-            _put(ws, r, 12, net(day_2, csv_key, long_col, short_col), align=RIGHT, fmt=IND_FMT)
+            # ---- MIDDLE block: net positions carried, TODAY .. N days ago ---- #
+            _put(ws, r, MID_LABEL_COL, disp, font=BOLD, align=LEFT)
+            for i, (_dt_i, day_i) in enumerate(days):
+                _put(ws, r, MID_DAY_COL0 + i,
+                     net(day_i, csv_key, long_col, short_col), align=RIGHT, fmt=IND_FMT)
             r += 1
 
         # ---- Total row ---- #
@@ -435,9 +486,23 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
         _put(ws, r, 5, tot_dshort, font=BOLD, fill=TOTAL_FILL, align=RIGHT, fmt=IND_FMT)
         _put(ws, r, 6, "", fill=TOTAL_FILL)
         _put(ws, r, 7, tot_dnet, font=BOLD, fill=TOTAL_FILL, align=RIGHT, fmt=IND_FMT)
-        for c in (9, 10, 11, 12):
-            _put(ws, r, c, "Total" if c == 9 else "", font=BOLD, fill=TOTAL_FILL, align=LEFT)
+        for c in range(MID_LABEL_COL, MID_LABEL_COL + 1 + NUM_DAYS):
+            _put(ws, r, c, "Total" if c == MID_LABEL_COL else "",
+                 font=BOLD, fill=TOTAL_FILL, align=LEFT)
         r += 1
+
+    # ---- India VIX close over the same sessions (mirrors the day columns) ---- #
+    if vix_hist:
+        vr = r + 1  # one blank row below the instrument tables
+        _put(ws, vr, MID_LABEL_COL, "India VIX", font=WHITE_BOLD, fill=NAVY, align=LEFT)
+        for i, label in enumerate(DAY_LABELS):
+            _put(ws, vr, MID_DAY_COL0 + i, label, font=WHITE_BOLD, fill=NAVY, align=CENTER)
+        _put(ws, vr + 1, MID_LABEL_COL, "Close", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_d, v) in enumerate(vix_hist):
+            _put(ws, vr + 1, MID_DAY_COL0 + i,
+                 v if v is not None else "-",
+                 align=RIGHT, fmt=(VIX_FMT if v is not None else None))
+        r = vr + 2
 
     # ---- RIGHT block: Positions Bought / Sold Today, grouped by participant --- #
     rr = 2
@@ -448,10 +513,10 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
                 - (day_today[csv_key][short_col] - day_1[csv_key][short_col])
             )
             n_lbl, n_font = _net_label(d_net, long_bullish)
-            _put(ws, rr, 14, disp, font=BOLD, align=LEFT)
-            _put(ws, rr, 15, n_lbl, font=n_font, align=LEFT)
-            _put(ws, rr, 16, instr_name, align=LEFT)
-            _put(ws, rr, 17, d_net, font=n_font, align=RIGHT, fmt=IND_FMT)
+            _put(ws, rr, RB, disp, font=BOLD, align=LEFT)
+            _put(ws, rr, RB + 1, n_lbl, font=n_font, align=LEFT)
+            _put(ws, rr, RB + 2, instr_name, align=LEFT)
+            _put(ws, rr, RB + 3, d_net, font=n_font, align=RIGHT, fmt=IND_FMT)
             rr += 1
 
     # ---- Nifty support & resistance (bottom-right, below the right block) ---- #
@@ -461,23 +526,23 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
         p = pivot_levels(h, l, c)
         s = rr + 2  # leave a blank row under the right block
 
-        _put(ws, s, 14, "Nifty 50  -  Support & Resistance", font=WHITE_BOLD, fill=NAVY, align=CENTER)
-        for cc in (15, 16, 17):
+        _put(ws, s, RB, "Nifty 50  -  Support & Resistance", font=WHITE_BOLD, fill=NAVY, align=CENTER)
+        for cc in (RB + 1, RB + 2, RB + 3):
             _put(ws, s, cc, None, fill=NAVY)
-        _put(ws, s + 1, 14, f"Next session  -  based on {ndate:%d-%b-%Y} OHLC",
+        _put(ws, s + 1, RB, f"Next session  -  based on {ndate:%d-%b-%Y} OHLC",
              font=BOLD, fill=SUBHEAD, align=CENTER)
-        for cc in (15, 16, 17):
+        for cc in (RB + 1, RB + 2, RB + 3):
             _put(ws, s + 1, cc, "", fill=SUBHEAD)
 
         # OHLC line
-        _put(ws, s + 2, 14, "Open", font=BOLD, align=LEFT)
-        _put(ws, s + 2, 15, o, align=RIGHT, fmt=NIFTY_FMT)
-        _put(ws, s + 2, 16, "High", font=BOLD, align=LEFT)
-        _put(ws, s + 2, 17, h, align=RIGHT, fmt=NIFTY_FMT)
-        _put(ws, s + 3, 14, "Low", font=BOLD, align=LEFT)
-        _put(ws, s + 3, 15, l, align=RIGHT, fmt=NIFTY_FMT)
-        _put(ws, s + 3, 16, "Close", font=BOLD, align=LEFT)
-        _put(ws, s + 3, 17, c, align=RIGHT, fmt=NIFTY_FMT)
+        _put(ws, s + 2, RB, "Open", font=BOLD, align=LEFT)
+        _put(ws, s + 2, RB + 1, o, align=RIGHT, fmt=NIFTY_FMT)
+        _put(ws, s + 2, RB + 2, "High", font=BOLD, align=LEFT)
+        _put(ws, s + 2, RB + 3, h, align=RIGHT, fmt=NIFTY_FMT)
+        _put(ws, s + 3, RB, "Low", font=BOLD, align=LEFT)
+        _put(ws, s + 3, RB + 1, l, align=RIGHT, fmt=NIFTY_FMT)
+        _put(ws, s + 3, RB + 2, "Close", font=BOLD, align=LEFT)
+        _put(ws, s + 3, RB + 3, c, align=RIGHT, fmt=NIFTY_FMT)
 
         # Resistances / pivot / supports (col 14-15) beside CPR (col 16-17)
         levels = [
@@ -488,15 +553,15 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
         cpr = [("CPR Top", p["tc"], BOLD), ("Pivot", p["pp"], BOLD), ("CPR Bottom", p["bc"], BOLD)]
         for i, (name, val, font) in enumerate(levels):
             row = s + 4 + i
-            _put(ws, row, 14, name, font=font, align=LEFT)
-            _put(ws, row, 15, val, font=font, align=RIGHT, fmt=NIFTY_FMT)
+            _put(ws, row, RB, name, font=font, align=LEFT)
+            _put(ws, row, RB + 1, val, font=font, align=RIGHT, fmt=NIFTY_FMT)
             if i < len(cpr):
                 cname, cval, cfont = cpr[i]
-                _put(ws, row, 16, cname, font=cfont, align=LEFT)
-                _put(ws, row, 17, cval, font=cfont, align=RIGHT, fmt=NIFTY_FMT)
+                _put(ws, row, RB + 2, cname, font=cfont, align=LEFT)
+                _put(ws, row, RB + 3, cval, font=cfont, align=RIGHT, fmt=NIFTY_FMT)
             else:
-                _put(ws, row, 16, "", border=False)
-                _put(ws, row, 17, "", border=False)
+                _put(ws, row, RB + 2, "", border=False)
+                _put(ws, row, RB + 3, "", border=False)
         sr_last = s + 4 + len(levels)
 
     # ---- Nifty option-chain OI support & resistance, graded by volume ---- #
@@ -506,9 +571,9 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
         o = sr_last + 2
 
         def _merge(row, text, font, fill):
-            ws.merge_cells(start_row=row, start_column=14, end_row=row, end_column=18)
-            _put(ws, row, 14, text, font=font, fill=fill, align=CENTER)
-            for cc in range(15, 19):
+            ws.merge_cells(start_row=row, start_column=RB, end_row=row, end_column=RB + 4)
+            _put(ws, row, RB, text, font=font, fill=fill, align=CENTER)
+            for cc in range(RB + 1, RB + 5):
                 _put(ws, row, cc, None, fill=fill)
 
         _merge(o, f"Nifty Option-Chain S/R   -   Weekly expiry {oc['expiry']}", WHITE_BOLD, NAVY)
@@ -517,17 +582,17 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
                BOLD, SUBHEAD)
 
         def _headers(row, oi_label):
-            for cc, txt in zip(range(14, 19), ["Strike", oi_label, "Chg OI", "Volume", "Strength"]):
+            for cc, txt in zip(range(RB, RB + 5), ["Strike", oi_label, "Chg OI", "Volume", "Strength"]):
                 _put(ws, row, cc, txt, font=BOLD, fill=INSTR_FILL, align=CENTER)
 
         def _level_row(row, rec, oi, chg, vol, strike_font):
             lbl = _strength(vol, mx)
             sfont = BOLD if lbl == "High" else (GREY if lbl == "Low" else None)
-            _put(ws, row, 14, rec["strike"], font=strike_font, align=RIGHT, fmt="#,##0")
-            _put(ws, row, 15, oi, align=RIGHT, fmt=IND_FMT)
-            _put(ws, row, 16, chg, font=(GREEN if chg >= 0 else RED), align=RIGHT, fmt=IND_FMT)
-            _put(ws, row, 17, vol, align=RIGHT, fmt=IND_FMT)
-            _put(ws, row, 18, lbl, font=sfont, align=CENTER)
+            _put(ws, row, RB, rec["strike"], font=strike_font, align=RIGHT, fmt="#,##0")
+            _put(ws, row, RB + 1, oi, align=RIGHT, fmt=IND_FMT)
+            _put(ws, row, RB + 2, chg, font=(GREEN if chg >= 0 else RED), align=RIGHT, fmt=IND_FMT)
+            _put(ws, row, RB + 3, vol, align=RIGHT, fmt=IND_FMT)
+            _put(ws, row, RB + 4, lbl, font=sfont, align=CENTER)
 
         row = o + 2
         _merge(row, "RESISTANCE   -   Call OI walls (higher = stronger cap)", RED_B, SUBHEAD)
@@ -547,19 +612,19 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
 
     # ---- footer with the dates used ---- #
     foot = max(r, rr, sr_last) + 1
+    dates_str = "    ".join(f"{label} = {d:%d-%b-%Y}" for label, (d, _) in zip(DAY_LABELS, days))
     _put(
         ws, foot, 1,
-        f"TODAY = {dt_today:%d-%b-%Y}    1 DAY AGO = {dt_1:%d-%b-%Y}    "
-        f"2 DAYS AGO = {dt_2:%d-%b-%Y}    (generated {datetime.now(IST):%d-%b-%Y %H:%M IST})",
+        f"{dates_str}    (generated {datetime.now(IST):%d-%b-%Y %H:%M IST})",
         font=Font(italic=True, color="808080"), border=False,
     )
 
     # ---- column widths ---- #
-    widths = {
-        1: 9, 2: 13, 3: 11, 4: 13, 5: 11, 6: 16, 7: 11, 8: 2,
-        9: 15, 10: 12, 11: 12, 12: 12, 13: 2,
-        14: 10, 15: 12, 16: 15, 17: 12, 18: 10,
-    }
+    widths = {1: 9, 2: 13, 3: 11, 4: 13, 5: 11, 6: 16, 7: 11, 8: 2, MID_LABEL_COL: 15}
+    for i in range(NUM_DAYS):                       # middle-block day columns
+        widths[MID_DAY_COL0 + i] = 12
+    widths[SPACER_MID_RIGHT] = 2                    # gutter before the right block
+    widths.update({RB: 10, RB + 1: 12, RB + 2: 15, RB + 3: 12, RB + 4: 10})
     for col, w in widths.items():
         ws.column_dimensions[get_column_letter(col)].width = w
     ws.freeze_panes = "A2"
@@ -567,15 +632,17 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None, path: Path) -> N
     wb.save(path)
 
 
-def data_fingerprint(days: list[tuple[date, dict]], ohlc) -> str:
+def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist) -> str:
     """Deterministic hash of the report's source data (ignores generation time).
 
-    Covers the 3 days of participant OI and the Nifty OHLC - the archive-based,
-    date-stamped inputs. Unchanged inputs -> identical hash -> no new commit.
+    Covers the loaded days of participant OI, the Nifty OHLC, and the India VIX
+    history - the archive-based, date-stamped inputs. Unchanged inputs -> identical
+    hash -> no new commit.
     """
     payload = {
         "days": [[d.isoformat(), day] for d, day in days],
         "ohlc": [ohlc[0].isoformat(), *ohlc[1:]] if ohlc else None,
+        "vix": [[d.isoformat(), v] for d, v in vix_hist] if vix_hist else None,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -593,9 +660,10 @@ def main() -> None:
     days = load_recent_days()
     ohlc = fetch_nifty_ohlc(days[0][0])
     oc = fetch_nifty_option_chain("NIFTY")
+    vix_hist = fetch_vix_history(days)
     print(f"Building {OUTPUT_FILE.name}...")
-    build(days, ohlc, oc, OUTPUT_FILE)
-    HASH_FILE.write_text(data_fingerprint(days, ohlc) + "\n")
+    build(days, ohlc, oc, vix_hist, OUTPUT_FILE)
+    HASH_FILE.write_text(data_fingerprint(days, ohlc, vix_hist) + "\n")
     print(f"Done -> {OUTPUT_FILE}")
 
 
