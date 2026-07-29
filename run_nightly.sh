@@ -3,7 +3,10 @@
 # Nightly driver: regenerate the participant-OI Excel report, then commit and
 # push the refreshed workbook so the copy on GitHub stays current.
 #
-# Invoked by the LaunchAgent com.marketanalysis.participantoi at 22:30 IST.
+# Invoked by the LaunchAgent com.marketanalysis.participantoi twice each weekday:
+# 20:30 IST (early) and 22:30 IST (fallback for late NSE publishing). The 22:30 run
+# is a no-op when the 20:30 run already captured the data - commit is gated on a
+# change to report_data.hash (see step 2 below).
 # Absolute tool paths are used because launchd runs with a minimal PATH.
 
 set -u
