@@ -45,10 +45,15 @@ python3 participant_oi.py   # inside the dev shell
 `run_nightly.sh` builds this env via `nix build .#pythonEnv --out-link .nix-python`
 (a GC root, so it survives `nix-collect-garbage`) and runs the script with it.
 
-## Scheduling (macOS, 10:30 PM IST on trading days)
+## Scheduling (macOS, 8:30 PM + 10:30 PM IST on trading days)
 
-A LaunchAgent (`com.marketanalysis.participantoi`) fires `run_nightly.sh` at 22:30
-local time **Mon-Fri**. The wrapper:
+A LaunchAgent (`com.marketanalysis.participantoi`) fires `run_nightly.sh` **twice
+per weekday (Mon-Fri)**: a primary run at 20:30 local time (8:30 PM IST) plus a
+fallback at 22:30 (10:30 PM IST). NSE usually publishes the participant file
+6:30-7:30 PM IST but occasionally after 8:30 PM (seen as late as ~8:57 PM), so the
+8:30 run can miss those days; the 10:30 run then catches them. Because commits are
+gated on `report_data.hash` (see below), the second fire is a harmless no-op
+whenever the first already captured the day's data. The wrapper:
 
 1. Runs `participant_oi.py`, which **no-ops on market holidays** (if NSE has
    published no participant file for the day, nothing is regenerated).
