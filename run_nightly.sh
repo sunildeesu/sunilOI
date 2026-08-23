@@ -6,7 +6,7 @@
 # Invoked by the LaunchAgent com.marketanalysis.participantoi twice each weekday:
 # 20:30 IST (early) and 22:30 IST (fallback for late NSE publishing). The 22:30 run
 # is a no-op when the 20:30 run already captured the data - commit is gated on a
-# change to report_data.hash (see step 2 below).
+# change to report_data.hash (see step 3 below).
 # Absolute tool paths are used because launchd runs with a minimal PATH.
 
 set -u
@@ -37,16 +37,33 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
-# 2. Commit & push only when the underlying data changed -------------------- #
+# 2. Reconcile with GitHub before committing --------------------------------- #
+# Merged PRs land on GitHub while this live clone keeps making nightly commits.
+# Fetch and fast-forward so the next push is not rejected with "(fetch first)".
+if ! "$GIT" fetch origin main; then
+    echo "git fetch origin main failed; aborting commit/push"
+    exit 1
+fi
+if ! "$GIT" merge --ff-only origin/main; then
+    echo "git merge --ff-only origin/main failed (local and remote both diverged); attempting rebase"
+    if ! "$GIT" rebase origin/main; then
+        echo "git rebase origin/main failed; manual reconciliation needed"
+        exit 1
+    fi
+fi
+
+# 3. Commit & push only when the underlying data changed -------------------- #
 # report_data.hash is a fingerprint of the source data (not the timestamp), so a
 # holiday/weekend or a same-day re-run produces no diff here and no commit.
 if [ -n "$("$GIT" status --porcelain -- report_data.hash)" ]; then
     "$GIT" add participant_oi.xlsx report_data.hash
     "$GIT" commit -m "Update participant OI report - $(date '+%Y-%m-%d')"
-    if "$GIT" push origin main; then
+    push_out=$("$GIT" push origin main 2>&1)
+    push_status=$?
+    if [ "$push_status" -eq 0 ]; then
         echo "pushed updated report to GitHub"
     else
-        echo "git push failed (keychain locked or offline?); will retry next run"
+        echo "git push failed (exit $push_status): $push_out"
         exit 1
     fi
 else
