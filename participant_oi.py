@@ -13,7 +13,7 @@ recent trading days and builds an Excel workbook mirroring the analyst layout:
 
 A compact "India VIX" strip below the middle block tracks the closing VIX over the
 same 5 sessions, followed by a "Nifty SRT" strip (Speculation Ratio Territory:
-Nifty close / 124-day SMA).
+Nifty close / 124-day SMA) and a weekly SRT strip (Nifty weekly close / 124-week SMA).
 
 Raw daily CSVs are cached under data/ so historical days are never re-fetched.
 Run any time after ~7 PM IST; NSE publishes the file after market close.
@@ -64,7 +64,10 @@ USER_AGENT = (
 )
 MAX_LOOKBACK_DAYS = 15  # safety bound when walking back over holidays
 NUM_DAYS = 5            # today .. 4 days ago (net-positions-carried horizon)
-SRT_SMA_DAYS = 124        # ~half a trading year; NK StockTalk SRT convention
+SRT_SMA_DAYS = 124        # ~half a trading year; NK StockTalk daily SRT convention
+SRT_WEEKLY_SMA_WEEKS = 124  # ~2.4 years; NK StockTalk weekly SRT convention
+SRT_WEEKLY_SELL = 1.24      # captain exit band: sell all holdings at/above this level
+NUM_WEEKS = NUM_DAYS        # weekly strip uses the same middle-block width
 
 
 def _day_label(i: int) -> str:
@@ -75,6 +78,16 @@ def _day_label(i: int) -> str:
 
 
 DAY_LABELS = [_day_label(i) for i in range(NUM_DAYS)]
+
+
+def _week_label(i: int) -> str:
+    """Column heading for the i-th most recent week (0 = this week)."""
+    if i == 0:
+        return "THIS WEEK"
+    return f"{i} WEEK{'S' if i > 1 else ''} AGO"
+
+
+WEEK_LABELS = [_week_label(i) for i in range(NUM_WEEKS)]
 
 # Column layout (1-based). Left block = cols 1-7 (col 8 spacer). The middle
 # "Total Positions Carried" block is a label column plus one column per day; the
@@ -276,20 +289,57 @@ def _srt_for_date(closes: list[tuple[date, float]], as_of: date):
 
 
 def fetch_srt_history(days: list[tuple[date, dict]]):
-    """Nifty SRT inputs for each report day: (date, close, sma124, srt_ratio)."""
+    """Nifty daily SRT for each report day: (date, close, sma124, srt_ratio)."""
     newest = days[0][0]
     needed = SRT_SMA_DAYS + NUM_DAYS + 30
     closes = fetch_nifty_close_history(newest, needed)
     return [(_d, *_srt_for_date(closes, _d)) for _d, _ in days]
 
 
-def _srt_font(value: float | None):
-    """Colour SRT by the usual NK StockTalk accumulation / exit bands."""
+def _aggregate_weekly_closes(daily: list[tuple[date, float]]) -> list[tuple[date, float]]:
+    """Oldest-first week-ending Nifty closes (last session of each ISO week)."""
+    by_week: dict[tuple[int, int], tuple[date, float]] = {}
+    for d, c in daily:
+        y, w, _ = d.isocalendar()
+        key = (y, w)
+        if key not in by_week or d > by_week[key][0]:
+            by_week[key] = (d, c)
+    return sorted(by_week.values(), key=lambda t: t[0])
+
+
+def _weekly_srt_for_week(weekly: list[tuple[date, float]], week_end: date):
+    """Return (close, sma124w, srt) for the week ending on `week_end`."""
+    eligible = [(d, c) for d, c in weekly if d <= week_end]
+    if len(eligible) < SRT_WEEKLY_SMA_WEEKS:
+        return None, None, None
+    window = eligible[-SRT_WEEKLY_SMA_WEEKS:]
+    spot = eligible[-1][1]
+    sma = sum(c for _, c in window) / SRT_WEEKLY_SMA_WEEKS
+    return spot, sma, spot / sma
+
+
+def fetch_weekly_srt_history(days: list[tuple[date, dict]]):
+    """Nifty weekly SRT for the latest NUM_WEEKS weeks: (week_end, close, sma124w, srt)."""
+    newest = days[0][0]
+    trading_days_needed = (SRT_WEEKLY_SMA_WEEKS + NUM_WEEKS + 10) * 5 + 100
+    daily = fetch_nifty_close_history(newest, trading_days_needed)
+    weekly = _aggregate_weekly_closes(daily)
+    if not weekly:
+        return []
+    recent = weekly[-NUM_WEEKS:]
+    return [
+        (week_end, *_weekly_srt_for_week(weekly, week_end))
+        for week_end, _ in reversed(recent)
+    ]
+
+
+def _srt_font(value: float | None, *, exit_at: float):
+    """Colour SRT by accumulation / exit bands (daily uses 1.3, weekly uses 1.24)."""
     if value is None:
         return None
     if value <= 0.9:
         return GREEN_B
-    if value >= 1.3:
+    if value >= exit_at:
         return RED_B
     return BOLD
 
@@ -463,6 +513,7 @@ def _net_label(delta, long_bullish=True):
 def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
           vix_hist: list[tuple[date, float | None]],
           srt_hist: list[tuple[date, float | None, float | None, float | None]],
+          weekly_srt_hist: list[tuple[date, float | None, float | None, float | None]],
           path: Path) -> None:
     # Day-over-day change (left & right blocks) compares today vs 1 day ago; the
     # middle block spans all loaded days.
@@ -560,17 +611,18 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
                  align=RIGHT, fmt=(VIX_FMT if v is not None else None))
         r = vr + 2
 
-    # ---- Nifty SRT (Speculation Ratio Territory) below VIX ----------------- #
+    # ---- Nifty daily SRT below VIX ----------------------------------------- #
     if srt_hist:
         sr = r
-        _put(ws, sr, MID_LABEL_COL, "Nifty SRT", font=WHITE_BOLD, fill=NAVY, align=LEFT)
+        _put(ws, sr, MID_LABEL_COL, "Nifty Daily SRT", font=WHITE_BOLD, fill=NAVY, align=LEFT)
         for i, label in enumerate(DAY_LABELS):
             _put(ws, sr, MID_DAY_COL0 + i, label, font=WHITE_BOLD, fill=NAVY, align=CENTER)
         _put(ws, sr + 1, MID_LABEL_COL, "SRT", font=BOLD, fill=SUBHEAD, align=LEFT)
         for i, (_d, _spot, _sma, srt) in enumerate(srt_hist):
             _put(ws, sr + 1, MID_DAY_COL0 + i,
                  srt if srt is not None else "-",
-                 font=_srt_font(srt), align=RIGHT, fmt=(SRT_FMT if srt is not None else None))
+                 font=_srt_font(srt, exit_at=1.3), align=RIGHT,
+                 fmt=(SRT_FMT if srt is not None else None))
         _put(ws, sr + 2, MID_LABEL_COL, f"{SRT_SMA_DAYS}-day SMA", font=BOLD, fill=SUBHEAD, align=LEFT)
         for i, (_d, _spot, sma, _srt) in enumerate(srt_hist):
             _put(ws, sr + 2, MID_DAY_COL0 + i,
@@ -582,6 +634,34 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
                  spot if spot is not None else "-",
                  align=RIGHT, fmt=(NIFTY_FMT if spot is not None else None))
         r = sr + 4
+
+    # ---- Nifty weekly SRT below daily SRT ---------------------------------- #
+    if weekly_srt_hist:
+        wr = r
+        _put(ws, wr, MID_LABEL_COL, "Nifty Weekly SRT", font=WHITE_BOLD, fill=NAVY, align=LEFT)
+        for i, label in enumerate(WEEK_LABELS):
+            _put(ws, wr, MID_DAY_COL0 + i, label, font=WHITE_BOLD, fill=NAVY, align=CENTER)
+        _put(ws, wr + 1, MID_LABEL_COL, "SRT", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_we, _spot, _sma, srt) in enumerate(weekly_srt_hist):
+            _put(ws, wr + 1, MID_DAY_COL0 + i,
+                 srt if srt is not None else "-",
+                 font=_srt_font(srt, exit_at=SRT_WEEKLY_SELL), align=RIGHT,
+                 fmt=(SRT_FMT if srt is not None else None))
+        _put(ws, wr + 2, MID_LABEL_COL, f"{SRT_WEEKLY_SMA_WEEKS}-week SMA",
+             font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_we, _spot, sma, _srt) in enumerate(weekly_srt_hist):
+            _put(ws, wr + 2, MID_DAY_COL0 + i,
+                 sma if sma is not None else "-",
+                 align=RIGHT, fmt=(NIFTY_FMT if sma is not None else None))
+        _put(ws, wr + 3, MID_LABEL_COL, "Weekly Close", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_we, spot, _sma, _srt) in enumerate(weekly_srt_hist):
+            _put(ws, wr + 3, MID_DAY_COL0 + i,
+                 spot if spot is not None else "-",
+                 align=RIGHT, fmt=(NIFTY_FMT if spot is not None else None))
+        _put(ws, wr + 4, MID_LABEL_COL, "Week ending", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (we, *_rest) in enumerate(weekly_srt_hist):
+            _put(ws, wr + 4, MID_DAY_COL0 + i, we.strftime("%d-%b-%Y"), align=CENTER)
+        r = wr + 5
 
     # ---- RIGHT block: Positions Bought / Sold Today, grouped by participant --- #
     rr = 2
@@ -711,11 +791,11 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
     wb.save(path)
 
 
-def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist, srt_hist) -> str:
+def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist, srt_hist, weekly_srt_hist) -> str:
     """Deterministic hash of the report's source data (ignores generation time).
 
     Covers the loaded days of participant OI, the Nifty OHLC, the India VIX
-    history, and the Nifty SRT inputs - the archive-based, date-stamped inputs.
+    history, and the daily and weekly Nifty SRT inputs.
     Unchanged inputs -> identical hash -> no new commit.
     """
     payload = {
@@ -723,6 +803,9 @@ def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist, srt_hist) ->
         "ohlc": [ohlc[0].isoformat(), *ohlc[1:]] if ohlc else None,
         "vix": [[d.isoformat(), v] for d, v in vix_hist] if vix_hist else None,
         "srt": [[d.isoformat(), spot, sma, srt] for d, spot, sma, srt in srt_hist] if srt_hist else None,
+        "weekly_srt": [
+            [d.isoformat(), spot, sma, srt] for d, spot, sma, srt in weekly_srt_hist
+        ] if weekly_srt_hist else None,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -742,9 +825,12 @@ def main() -> None:
     oc = fetch_nifty_option_chain("NIFTY")
     vix_hist = fetch_vix_history(days)
     srt_hist = fetch_srt_history(days)
+    weekly_srt_hist = fetch_weekly_srt_history(days)
     print(f"Building {OUTPUT_FILE.name}...")
-    build(days, ohlc, oc, vix_hist, srt_hist, OUTPUT_FILE)
-    HASH_FILE.write_text(data_fingerprint(days, ohlc, vix_hist, srt_hist) + "\n")
+    build(days, ohlc, oc, vix_hist, srt_hist, weekly_srt_hist, OUTPUT_FILE)
+    HASH_FILE.write_text(
+        data_fingerprint(days, ohlc, vix_hist, srt_hist, weekly_srt_hist) + "\n"
+    )
     print(f"Done -> {OUTPUT_FILE}")
 
 
