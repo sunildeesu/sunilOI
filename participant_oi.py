@@ -12,7 +12,8 @@ recent trading days and builds an Excel workbook mirroring the analyst layout:
   * Right block  "Positions Bought / Sold Today"- the net-change data pivoted by participant
 
 A compact "India VIX" strip below the middle block tracks the closing VIX over the
-same 5 sessions.
+same 5 sessions, followed by a "Nifty SRT" strip (Speculation Ratio Territory:
+Nifty close / 124-day SMA).
 
 Raw daily CSVs are cached under data/ so historical days are never re-fetched.
 Run any time after ~7 PM IST; NSE publishes the file after market close.
@@ -63,6 +64,7 @@ USER_AGENT = (
 )
 MAX_LOOKBACK_DAYS = 15  # safety bound when walking back over holidays
 NUM_DAYS = 5            # today .. 4 days ago (net-positions-carried horizon)
+SRT_SMA_DAYS = 124        # ~half a trading year; NK StockTalk SRT convention
 
 
 def _day_label(i: int) -> str:
@@ -241,6 +243,57 @@ def fetch_vix_history(days: list[tuple[date, dict]]) -> list[tuple[date, float |
     return out
 
 
+def fetch_nifty_close_history(end: date, trading_days: int) -> list[tuple[date, float]]:
+    """Oldest-first Nifty 50 closes over `trading_days` sessions ending at `end`."""
+    collected: list[tuple[date, float]] = []
+    cur = end
+    steps = 0
+    max_steps = trading_days * 2 + 60  # weekends and holiday buffer
+    while len(collected) < trading_days and steps < max_steps:
+        text = _fetch_index_close_csv(cur)
+        if text:
+            row = _index_row(text, "Nifty 50")
+            if row:
+                collected.append((cur, float(row[5])))
+        cur -= timedelta(days=1)
+        steps += 1
+    collected.reverse()
+    return collected
+
+
+def _srt_for_date(closes: list[tuple[date, float]], as_of: date):
+    """Return (close, sma124, srt) for `as_of`, or (None, None, None) if unavailable."""
+    by_date = {d: c for d, c in closes}
+    if as_of not in by_date:
+        return None, None, None
+    eligible = [(d, c) for d, c in closes if d <= as_of]
+    if len(eligible) < SRT_SMA_DAYS:
+        return None, None, None
+    window = eligible[-SRT_SMA_DAYS:]
+    spot = by_date[as_of]
+    sma = sum(c for _, c in window) / SRT_SMA_DAYS
+    return spot, sma, spot / sma
+
+
+def fetch_srt_history(days: list[tuple[date, dict]]):
+    """Nifty SRT inputs for each report day: (date, close, sma124, srt_ratio)."""
+    newest = days[0][0]
+    needed = SRT_SMA_DAYS + NUM_DAYS + 30
+    closes = fetch_nifty_close_history(newest, needed)
+    return [(_d, *_srt_for_date(closes, _d)) for _d, _ in days]
+
+
+def _srt_font(value: float | None):
+    """Colour SRT by the usual NK StockTalk accumulation / exit bands."""
+    if value is None:
+        return None
+    if value <= 0.9:
+        return GREEN_B
+    if value >= 1.3:
+        return RED_B
+    return BOLD
+
+
 def pivot_levels(high: float, low: float, close: float) -> dict[str, float]:
     """Classic floor-trader pivot points + Central Pivot Range for the next session."""
     pp = (high + low + close) / 3
@@ -361,6 +414,7 @@ BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 IND_FMT = "#,##,##0;-#,##,##0;0"  # Indian digit grouping, kept numeric
 NIFTY_FMT = "#,##,##0.00"          # index level with two decimals
 VIX_FMT = "0.00"                   # volatility index, two decimals
+SRT_FMT = "0.000"                  # speculation ratio, three decimals
 
 
 def _put(ws, r, c, value, *, font=None, fill=None, align=None, fmt=None, border=True):
@@ -407,7 +461,9 @@ def _net_label(delta, long_bullish=True):
 # Build workbook
 # --------------------------------------------------------------------------- #
 def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
-          vix_hist: list[tuple[date, float | None]], path: Path) -> None:
+          vix_hist: list[tuple[date, float | None]],
+          srt_hist: list[tuple[date, float | None, float | None, float | None]],
+          path: Path) -> None:
     # Day-over-day change (left & right blocks) compares today vs 1 day ago; the
     # middle block spans all loaded days.
     (dt_today, day_today) = days[0]
@@ -503,6 +559,29 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
                  v if v is not None else "-",
                  align=RIGHT, fmt=(VIX_FMT if v is not None else None))
         r = vr + 2
+
+    # ---- Nifty SRT (Speculation Ratio Territory) below VIX ----------------- #
+    if srt_hist:
+        sr = r
+        _put(ws, sr, MID_LABEL_COL, "Nifty SRT", font=WHITE_BOLD, fill=NAVY, align=LEFT)
+        for i, label in enumerate(DAY_LABELS):
+            _put(ws, sr, MID_DAY_COL0 + i, label, font=WHITE_BOLD, fill=NAVY, align=CENTER)
+        _put(ws, sr + 1, MID_LABEL_COL, "SRT", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_d, _spot, _sma, srt) in enumerate(srt_hist):
+            _put(ws, sr + 1, MID_DAY_COL0 + i,
+                 srt if srt is not None else "-",
+                 font=_srt_font(srt), align=RIGHT, fmt=(SRT_FMT if srt is not None else None))
+        _put(ws, sr + 2, MID_LABEL_COL, f"{SRT_SMA_DAYS}-day SMA", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_d, _spot, sma, _srt) in enumerate(srt_hist):
+            _put(ws, sr + 2, MID_DAY_COL0 + i,
+                 sma if sma is not None else "-",
+                 align=RIGHT, fmt=(NIFTY_FMT if sma is not None else None))
+        _put(ws, sr + 3, MID_LABEL_COL, "Nifty Close", font=BOLD, fill=SUBHEAD, align=LEFT)
+        for i, (_d, spot, _sma, _srt) in enumerate(srt_hist):
+            _put(ws, sr + 3, MID_DAY_COL0 + i,
+                 spot if spot is not None else "-",
+                 align=RIGHT, fmt=(NIFTY_FMT if spot is not None else None))
+        r = sr + 4
 
     # ---- RIGHT block: Positions Bought / Sold Today, grouped by participant --- #
     rr = 2
@@ -632,17 +711,18 @@ def build(days: list[tuple[date, dict]], ohlc, oc: dict | None,
     wb.save(path)
 
 
-def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist) -> str:
+def data_fingerprint(days: list[tuple[date, dict]], ohlc, vix_hist, srt_hist) -> str:
     """Deterministic hash of the report's source data (ignores generation time).
 
-    Covers the loaded days of participant OI, the Nifty OHLC, and the India VIX
-    history - the archive-based, date-stamped inputs. Unchanged inputs -> identical
-    hash -> no new commit.
+    Covers the loaded days of participant OI, the Nifty OHLC, the India VIX
+    history, and the Nifty SRT inputs - the archive-based, date-stamped inputs.
+    Unchanged inputs -> identical hash -> no new commit.
     """
     payload = {
         "days": [[d.isoformat(), day] for d, day in days],
         "ohlc": [ohlc[0].isoformat(), *ohlc[1:]] if ohlc else None,
         "vix": [[d.isoformat(), v] for d, v in vix_hist] if vix_hist else None,
+        "srt": [[d.isoformat(), spot, sma, srt] for d, spot, sma, srt in srt_hist] if srt_hist else None,
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -661,9 +741,10 @@ def main() -> None:
     ohlc = fetch_nifty_ohlc(days[0][0])
     oc = fetch_nifty_option_chain("NIFTY")
     vix_hist = fetch_vix_history(days)
+    srt_hist = fetch_srt_history(days)
     print(f"Building {OUTPUT_FILE.name}...")
-    build(days, ohlc, oc, vix_hist, OUTPUT_FILE)
-    HASH_FILE.write_text(data_fingerprint(days, ohlc, vix_hist) + "\n")
+    build(days, ohlc, oc, vix_hist, srt_hist, OUTPUT_FILE)
+    HASH_FILE.write_text(data_fingerprint(days, ohlc, vix_hist, srt_hist) + "\n")
     print(f"Done -> {OUTPUT_FILE}")
 
 
