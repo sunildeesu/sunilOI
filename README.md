@@ -15,8 +15,10 @@ recent trading days:
 - **Total Positions Carried** - net position (Long − Short) for TODAY / 1 DAY AGO / 2 DAYS AGO.
 - **Positions Bought / Sold Today** - the net-change data pivoted by participant.
 - **India VIX** - closing VIX for the same 5 sessions (middle block, below participant tables).
-- **Nifty SRT** - Speculation Ratio Territory (Nifty close ÷ 124-day SMA) for the same
-  5 sessions, directly below VIX; green ≤0.9 (accumulation band), red ≥1.3 (exit band).
+- **Nifty Daily SRT** - daily Speculation Ratio Territory (Nifty close ÷ 124-day SMA) for
+  the same 5 sessions; green ≤0.9, red ≥1.3.
+- **Nifty Weekly SRT** - weekly SRT (week-ending close ÷ 124-week SMA) for the latest
+  5 weeks; green ≤0.9, red ≥1.24 (exit-all-holdings band).
 - **Nifty S/R (pivot points)** - classic floor-trader pivots (R1–R3, S1–S3) + CPR
   from the latest session's OHLC.
 - **Nifty S/R (option-chain OI walls)** - top Call-OI resistance and Put-OI support
